@@ -36,7 +36,30 @@ function App() {
   const [lastSaved, setLastSaved] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  // Real-time listener for shipments
+  // ✅ Bulk initializer: ensure all months exist
+  useEffect(() => {
+    const initializeMonths = async () => {
+      try {
+        for (const month of MONTHS) {
+          const monthDoc = doc(db, 'freight-data', month);
+          const snapshot = await getDoc(monthDoc);
+          if (!snapshot.exists()) {
+            await setDoc(monthDoc, {
+              shipments: [],
+              lastModified: new Date().toISOString(),
+              month,
+            });
+            console.log(`Initialized ${month} in Firestore`);
+          }
+        }
+      } catch (err) {
+        console.error('Error initializing months:', err);
+      }
+    };
+    initializeMonths();
+  }, []);
+
+  // Real-time listener
   useEffect(() => {
     const monthDoc = doc(db, 'freight-data', selectedMonth);
     const unsubscribe = onSnapshot(monthDoc, (docSnapshot) => {
@@ -49,7 +72,7 @@ function App() {
     return () => unsubscribe();
   }, [selectedMonth]);
 
-  // Save to Firebase
+  // Save to Firestore
   const saveToFirebase = async (updatedShipments) => {
     try {
       setIsSaving(true);
@@ -68,6 +91,7 @@ function App() {
     }
   };
 
+  // Focus input on edit
   useEffect(() => {
     if (editingCell && inputRef.current) {
       inputRef.current.focus();
@@ -97,16 +121,27 @@ function App() {
   const totalCost = shipments.reduce((sum, s) => sum + s.shippingCharge, 0);
   const maxCount = Math.max(...companySummary.map((c) => c.count), 1);
 
-  const handleMonthChange = (newMonth) => setSelectedMonth(newMonth);
-
-  // ✅ Fixed: only one definition of handleCellClick
-  const handleCellClick = (rowIndex, field) => {
-    // Check if the shipment exists first
-    if (!shipments[rowIndex]) {
-      console.log('Shipment not ready yet');
-      return;
+  // ✅ Auto-create doc if missing when switching months
+  const handleMonthChange = async (newMonth) => {
+    setSelectedMonth(newMonth);
+    try {
+      const monthDoc = doc(db, 'freight-data', newMonth);
+      const snapshot = await getDoc(monthDoc);
+      if (!snapshot.exists()) {
+        await setDoc(monthDoc, {
+          shipments: [],
+          lastModified: new Date().toISOString(),
+          month: newMonth,
+        });
+        console.log(`Created Firestore doc for ${newMonth}`);
+      }
+    } catch (error) {
+      console.error('Error creating month document:', error);
     }
+  };
 
+  const handleCellClick = (rowIndex, field) => {
+    if (!shipments[rowIndex]) return;
     const value = shipments[rowIndex][field];
     setEditingCell({ rowIndex, field });
     setEditValue(value || '');
@@ -125,7 +160,6 @@ function App() {
   const handleCellChange = (e) => {
     const value = e.target.value;
     setEditValue(value);
-
     if (editingCell && (editingCell.field === 'company' || editingCell.field === 'agent')) {
       const options = editingCell.field === 'company' ? companies : agents;
       const filtered = options.filter((option) =>
@@ -192,26 +226,20 @@ function App() {
   };
 
   const handleAddRow = () => {
-  const newShipment = {
-    id: Date.now(),
-    refNum: '', shipDate: '', returnDate: '', location: '', returnLocation: '',
-    company: '', shipMethod: '', shippingCharge: 0, po: '', agent: '',
+    const newShipment = {
+      id: Date.now(),
+      refNum: '', shipDate: '', returnDate: '', location: '', returnLocation: '',
+      company: '', shipMethod: '', shippingCharge: 0, po: '', agent: '',
+    };
+    const updatedShipments = [...shipments, newShipment];
+    setShipments(updatedShipments);
+    saveToFirebase(updatedShipments);
+    setTimeout(() => {
+      if (updatedShipments.length > 0) {
+        handleCellClick(updatedShipments.length - 1, 'refNum');
+      }
+    }, 300);
   };
-  const updatedShipments = [...shipments, newShipment];
-  
-  // Update local state first for immediate feedback
-  setShipments(updatedShipments);
-  
-  // Then save to Firebase
-  saveToFirebase(updatedShipments);
-  
-  // Wait a bit longer before trying to edit the new cell
-  setTimeout(() => {
-    if (updatedShipments.length > 0) {
-      handleCellClick(updatedShipments.length - 1, 'refNum');
-    }
-  }, 300);
-};
 
   const handleDeleteRow = (index) => {
     if (window.confirm('Delete this shipment?')) {
@@ -244,6 +272,7 @@ function App() {
     }
   };
 
+  // Cell renderer
   const renderCell = (rowIndex, field, value) => {
     const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.field === field;
     const isNumeric = field === 'shippingCharge';
@@ -327,6 +356,9 @@ function App() {
     '#06b6d4', '#6366f1', '#f97316', '#14b8a6', '#f43f5e',
   ];
 
+  // ==============================
+  // Main JSX
+  // ==============================
   return (
     <div style={{ minHeight: '100vh', background: 'white' }}>
       <div style={{ maxWidth: '98%', margin: '0 auto', padding: '16px' }}>

@@ -38,26 +38,43 @@ function App() {
 
   // ✅ Bulk initializer: ensure all months exist
   useEffect(() => {
-    const initializeMonths = async () => {
-      try {
-        for (const month of MONTHS) {
-          const monthDoc = doc(db, 'freight-data', month);
-          const snapshot = await getDoc(monthDoc);
-          if (!snapshot.exists()) {
-            await setDoc(monthDoc, {
-              shipments: [],
-              lastModified: new Date().toISOString(),
-              month,
-            });
-            console.log(`Initialized ${month} in Firestore`);
-          }
+  const initializeMonths = async () => {
+    try {
+      for (const month of MONTHS) {
+        const monthDoc = doc(db, 'freight-data', month);
+        const snapshot = await getDoc(monthDoc);
+
+        if (!snapshot.exists()) {
+          const defaultShipment = {
+            id: Date.now(),
+            refNum: '',
+            shipDate: '',
+            returnDate: '',
+            location: '',
+            returnLocation: '',
+            company: COMPANIES[0],  // Pre-fill with first company
+            shipMethod: '',
+            shippingCharge: 0,
+            po: '',
+            agent: AGENTS[0],       // Pre-fill with first agent
+          };
+
+          await setDoc(monthDoc, {
+            shipments: [defaultShipment],
+            lastModified: new Date().toISOString(),
+            month,
+          });
+
+          console.log(`Initialized ${month} with default shipment`);
         }
-      } catch (err) {
-        console.error('Error initializing months:', err);
       }
-    };
-    initializeMonths();
-  }, []);
+    } catch (err) {
+      console.error('Error initializing months:', err);
+    }
+  };
+
+  initializeMonths();
+}, []);
 
   // Real-time listener
   useEffect(() => {

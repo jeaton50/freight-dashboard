@@ -1,23 +1,44 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import ExcelJS from 'exceljs';
+import { toPng } from 'html-to-image';
 import { db } from './firebase';
 import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 import './App.css';
 
 // ============================================
-// CONFIGURATION
+// DEFAULTS (used to bootstrap Firestore config)
 // ============================================
-const COMPANIES = [
+const DEFAULT_COMPANIES = [
   'COWBOYS', 'CRANE', 'FLORIDA FREIGHT', 'KOL', 'PHOENIX FREIGHT',
   'NEVILLE', 'SPI', 'TAZ', 'UP&GO', 'YOPO', 'Logistify',
   'ALG', 'PC EXPRESS', 'EXOTIC RETAILERS', 'ON Spot (neville)',
 ];
 
-const AGENTS = [
+const DEFAULT_AGENTS = [
   'D.MERCRIT', 'P.VANDENBRINK', 'A.SURFA', 'J.HOLLAND',
   'C.SNIPES', 'A.STELLUTO', 'R.VANDENBRINK', 'S.GRAVES',
   'B.DELLACROCE', 'M.KAIGLER',
 ];
+
+// Global default locations (bootstraps Firestore once)
+const DEFAULT_LOCATIONS = [
+  'Rentex-Anaheim',
+  'Rentex-Boston',
+  'Rentex Chicago',
+  'Rentex Ft. Lauderdale',
+  'Rentex Las Vegas',
+  'Rentex-Nashville',
+  'Rentex NY/NJ',
+  'Rentex Orlando',
+  'Rentex Philadelphia',
+  'Rentex Phoenix',
+  'Rentex San Francisco',
+  'Rentex Washington DC',
+];
+
+// ✅ New: ship method options for autocomplete
+const SHIP_METHODS = ['Round Trip', 'One Way', 'Daily rate'];
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -26,9 +47,20 @@ const MONTHS = [
 
 function App() {
   const [selectedMonth, setSelectedMonth] = useState('January');
+
+  // Global, real-time lists (from Firestore config)
+  const [companies, setCompanies] = useState(DEFAULT_COMPANIES);
+  const [locations, setLocations] = useState(DEFAULT_LOCATIONS);
+  const [agents] = useState(DEFAULT_AGENTS);
+
+  // Add-item UI state
+  const [newCompany, setNewCompany] = useState('');
+  const [newLocation, setNewLocation] = useState('');
+
+  // Shipments for selected month
   const [shipments, setShipments] = useState([]);
-  const [companies] = useState(COMPANIES);
-  const [agents] = useState(AGENTS);
+
+  // Editing state
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
@@ -38,47 +70,95 @@ function App() {
   const [lastSaved, setLastSaved] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  // Helper to build a default row
+  // Refs for capturing graphics as images (for Excel dashboard)
+  const costPerCompanyRef = useRef(null);
+  const shipmentCountRef = useRef(null);
+  const revenueDistRef = useRef(null);
+
+  // =========================
+  // CONFIG: Global lists
+  // =========================
+  useEffect(() => {
+    const cfgRef = doc(db, 'freight-config', 'global');
+
+    // Create config doc if missing (bootstraps both lists)
+    (async () => {
+      const snap = await getDoc(cfgRef);
+      if (!snap.exists()) {
+        await setDoc(cfgRef, {
+          companies: DEFAULT_COMPANIES,
+          locations: DEFAULT_LOCATIONS,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        // If doc exists but is missing a field, backfill it
+        const data = snap.data() || {};
+        const payload = {};
+        if (!Array.isArray(data.companies)) payload.companies = DEFAULT_COMPANIES;
+        if (!Array.isArray(data.locations)) payload.locations = DEFAULT_LOCATIONS;
+        if (Object.keys(payload).length) {
+          payload.updatedAt = new Date().toISOString();
+          await setDoc(cfgRef, payload, { merge: true });
+        }
+      }
+    })();
+
+    // Real-time subscription to global config
+    const unsub = onSnapshot(cfgRef, (d) => {
+      if (d.exists()) {
+        const data = d.data() || {};
+        setCompanies(Array.isArray(data.companies) && data.companies.length ? data.companies : DEFAULT_COMPANIES);
+        setLocations(Array.isArray(data.locations) && data.locations.length ? data.locations : DEFAULT_LOCATIONS);
+      } else {
+        setCompanies(DEFAULT_COMPANIES);
+        setLocations(DEFAULT_LOCATIONS);
+      }
+    });
+
+    return () => unsub();
+  }, []);
+
+  // Helper to build a default row (uses first global company/location if available)
   const buildDefaultShipment = () => ({
     id: Date.now(),
     refNum: '',
     shipDate: '',
     returnDate: '',
-    location: '',
+    location: locations?.[0] || '',
     returnLocation: '',
-    company: COMPANIES[0],
-    shipMethod: '',
+    company: companies?.[0] || '',
+    shipMethod: SHIP_METHODS[0], // ✅ default to first method ("Round Trip")
     shippingCharge: 0,
     po: '',
-    agent: AGENTS[0],
+    agent: agents?.[0] || '',
   });
 
-  // ✅ Bulk initializer: ensure each month exists and has at least one default row
+  // ✅ Ensure each month exists with at least one default row
   useEffect(() => {
     const initializeMonths = async () => {
       try {
         for (const month of MONTHS) {
           const monthDoc = doc(db, 'freight-data', month);
           const snapshot = await getDoc(monthDoc);
-
           const missing = !snapshot.exists();
           const empty = !missing && (!snapshot.data().shipments || snapshot.data().shipments.length === 0);
-
           if (missing || empty) {
             await setDoc(monthDoc, {
               shipments: [buildDefaultShipment()],
               lastModified: new Date().toISOString(),
               month,
             });
-            console.log(`Initialized/Reset ${month}`);
           }
         }
       } catch (err) {
         console.error('Error initializing months:', err);
       }
     };
+    // run after globals are available so the default row uses current lists
     initializeMonths();
-  }, []); // run once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companies, locations]);
 
   // 🔁 Real-time listener for the selected month
   useEffect(() => {
@@ -93,7 +173,7 @@ function App() {
     return () => unsubscribe();
   }, [selectedMonth]);
 
-  // 💾 Save to Firestore
+  // 💾 Save to Firestore (shipments)
   const saveToFirebase = async (updatedShipments) => {
     try {
       setIsSaving(true);
@@ -112,7 +192,7 @@ function App() {
     }
   };
 
-  // 🔀 Change month (ensure the doc exists and has at least 1 default row)
+  // 🔀 Change month & ensure doc exists
   const handleMonthChange = async (newMonth) => {
     setSelectedMonth(newMonth);
     try {
@@ -126,7 +206,6 @@ function App() {
           lastModified: new Date().toISOString(),
           month: newMonth,
         });
-        console.log(`Prepared ${newMonth}`);
       }
     } catch (e) {
       console.error('Error preparing month:', e);
@@ -138,18 +217,18 @@ function App() {
     if (!inputRef.current) return;
     const rect = inputRef.current.getBoundingClientRect();
     const vh = window.innerHeight;
-    const maxHeight = 400; // show lots of options without scrolling the PAGE
+    const maxHeight = 400;
     const padding = 6;
     const spaceBelow = vh - rect.bottom - padding;
     const spaceAbove = rect.top - padding;
-    const openUp = spaceBelow < 220 && spaceAbove > spaceBelow; // flip if space below is tight
+    const openUp = spaceBelow < 220 && spaceAbove > spaceBelow;
     const height = Math.min(openUp ? spaceAbove - padding : spaceBelow - padding, maxHeight);
 
     setDropdownRect({
       top: openUp ? rect.top - height - 4 : rect.bottom + 4,
       left: rect.left,
       width: rect.width,
-      height: Math.max(180, height), // at least this tall
+      height: Math.max(180, height),
     });
   };
 
@@ -180,6 +259,15 @@ function App() {
       setFilteredOptions(agents);
       setShowDropdown(true);
       setTimeout(computeDropdownPosition, 0);
+    } else if (field === 'location' || field === 'returnLocation') {
+      setFilteredOptions(locations);
+      setShowDropdown(true);
+      setTimeout(computeDropdownPosition, 0);
+    } else if (field === 'shipMethod') {
+      // ✅ ship method autocomplete
+      setFilteredOptions(SHIP_METHODS);
+      setShowDropdown(true);
+      setTimeout(computeDropdownPosition, 0);
     } else {
       setShowDropdown(false);
     }
@@ -188,8 +276,20 @@ function App() {
   const handleCellChange = (e) => {
     const value = e.target.value;
     setEditValue(value);
-    if (editingCell && (editingCell.field === 'company' || editingCell.field === 'agent')) {
-      const options = editingCell.field === 'company' ? companies : agents;
+
+    const field = editingCell?.field;
+    if (!field) return;
+
+    if (['company', 'agent', 'location', 'returnLocation', 'shipMethod'].includes(field)) {
+      const options =
+        field === 'company'
+          ? companies
+          : field === 'agent'
+          ? agents
+          : field === 'shipMethod'
+          ? SHIP_METHODS
+          : locations;
+
       const filtered = options.filter((option) =>
         option.toLowerCase().includes(value.toLowerCase())
       );
@@ -206,7 +306,6 @@ function App() {
   };
 
   const handleCellBlur = () => {
-    // Delay to allow onMouseDown on dropdown to fire first
     setTimeout(() => {
       if (editingCell) {
         const { rowIndex, field } = editingCell;
@@ -272,35 +371,236 @@ function App() {
     }
   };
 
-  const exportData = async () => {
-    const allData = {};
+  // ============================
+  // GLOBAL: Add company/location
+  // ============================
+  const addCompanyGlobal = async () => {
+    const raw = newCompany.trim();
+    if (!raw) return;
+    const candidate = raw.toUpperCase();
+    const exists = companies.some(c => c.toUpperCase() === candidate);
+    if (exists) {
+      alert(`"${candidate}" already exists.`);
+      return;
+    }
+    const next = [...companies, candidate].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+
+    try {
+      const cfgRef = doc(db, 'freight-config', 'global');
+      await setDoc(
+        cfgRef,
+        { companies: next, updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
+      setNewCompany('');
+    } catch (e) {
+      console.error('Failed to add company:', e);
+      alert('Failed to add company. Check your permissions/rules.');
+    }
+  };
+
+  const addLocationGlobal = async () => {
+    const raw = newLocation.trim();
+    if (!raw) return;
+    // Keep original capitalization for locations
+    const exists = locations.some(l => l.toLowerCase() === raw.toLowerCase());
+    if (exists) {
+      alert(`"${raw}" already exists.`);
+      return;
+    }
+    const next = [...locations, raw].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+
+    try {
+      const cfgRef = doc(db, 'freight-config', 'global');
+      await setDoc(
+        cfgRef,
+        { locations: next, updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
+      setNewLocation('');
+    } catch (e) {
+      console.error('Failed to add location:', e);
+      alert('Failed to add location. Check your permissions/rules.');
+    }
+  };
+
+  // ======== EXCEL EXPORT (with embedded images) ========
+  const excelColumns = [
+  { header: 'Reference #',   key: 'refNum' },
+  { header: 'Ship Date',     key: 'shipDate' },
+  { header: 'Return Date',   key: 'returnDate' },
+  { header: 'Location',      key: 'location' },
+  { header: 'Return Location', key: 'returnLocation' },
+  { header: 'Company',       key: 'company' },
+  { header: 'Ship Method',   key: 'shipMethod' },
+  { header: 'Charges',       key: 'shippingCharge' },
+  { header: 'PO',            key: 'po' },
+  { header: 'Agent',         key: 'agent' },
+];
+
+// Map rows for Excel WITHOUT the id column
+const mapRowsForExcel = (rows) =>
+  rows.map((s) => ({
+    refNum: s.refNum ?? '',
+    shipDate: s.shipDate ?? '',
+    returnDate: s.returnDate ?? '',
+    location: s.location ?? '',
+    returnLocation: s.returnLocation ?? '',
+    company: s.company ?? '',
+    shipMethod: s.shipMethod ?? '',
+    shippingCharge: Number(s.shippingCharge || 0),
+    po: s.po ?? '',
+    agent: s.agent ?? '',
+  }));
+
+// Helper to autosize columns based on content length
+const autosizeColumns = (sheet) => {
+  sheet.columns.forEach((col) => {
+    let max = (col.header ? String(col.header).length : 10);
+    col.eachCell({ includeEmpty: true }, (cell) => {
+      const v = cell.value;
+      const len =
+        v == null
+          ? 0
+          : typeof v === 'object' && v.text
+          ? String(v.text).length
+          : String(v).length;
+      if (len > max) max = len;
+    });
+    // Add a little padding; cap width so images/dashboard sheet stays readable
+    col.width = Math.min(max + 2, 40);
+  });
+};
+
+// Build a pretty data sheet with frozen header, bold header, currency, autosize
+const buildDataSheetPretty = (wb, title, rows) => {
+  const safeTitle = title.slice(0, 31);
+  const sheet = wb.addWorksheet(safeTitle, {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+
+  // Set columns (Title Case headers + keys)
+  sheet.columns = excelColumns;
+
+  // Bold header row
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+
+  // Add rows
+  rows.forEach((r) => sheet.addRow(r));
+
+  // Currency format on Charges
+  sheet.getColumn('shippingCharge').numFmt = '$#,##0.00';
+
+  // Autosize all columns to fit
+  autosizeColumns(sheet);
+
+  return sheet;
+};
+
+// Trigger a file download for a given Blob
+const downloadBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+
+
+  const exportMonthExcel = async () => {
+    const capture = async (node) =>
+      node ? await toPng(node, { cacheBust: true, backgroundColor: 'white', pixelRatio: 2 }) : null;
+
+    const [imgCostPerCompany, imgShipmentCount, imgRevenueDist] = await Promise.all([
+      capture(costPerCompanyRef.current),
+      capture(shipmentCountRef.current),
+      capture(revenueDistRef.current),
+    ]);
+
+    const wb = new ExcelJS.Workbook();
+    const dataRows = mapRowsForExcel(shipments);
+    buildDataSheetPretty(wb, selectedMonth, dataRows);
+
+    const dash = wb.addWorksheet('Dashboard', { pageSetup: { orientation: 'landscape' } });
+    const addImg = (base64, tlRow, tlCol, widthPx, heightPx) => {
+      if (!base64) return;
+      const imgId = wb.addImage({ base64, extension: 'png' });
+      dash.addImage(imgId, {
+        tl: { col: tlCol, row: tlRow },
+        ext: { width: widthPx, height: heightPx },
+        editAs: 'oneCell',
+      });
+    };
+
+    const title = dash.getCell('A1');
+    title.value = `Dashboard — ${selectedMonth}`;
+    title.font = { bold: true, size: 16 };
+    dash.mergeCells('A1:F1');
+
+    addImg(imgCostPerCompany, 2, 0, 900, 350);
+    addImg(imgShipmentCount,   18, 0, 900, 350);
+    addImg(imgRevenueDist,     34, 0, 900, 350);
+
+    const buf = await wb.xlsx.writeBuffer();
+    downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      `freight-${selectedMonth}-${new Date().toISOString().split('T')[0]}.xlsx`
+    );
+  };
+
+  const exportAllMonthsExcel = async () => {
+    const wb = new ExcelJS.Workbook();
     for (const month of MONTHS) {
       const monthDocRef = doc(db, 'freight-data', month);
       const docSnap = await getDoc(monthDocRef);
-      if (docSnap.exists()) {
-        allData[month] = docSnap.data().shipments || [];
-      }
+      const list = docSnap.exists() ? docSnap.data().shipments || [] : [];
+      const rows = mapRowsForExcel(list);
+      buildDataSheetPretty(wb, month, rows);
     }
-    const dataStr = JSON.stringify(allData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `freight-data-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
+    const buf = await wb.xlsx.writeBuffer();
+    downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      `freight-all-months-${new Date().toISOString().split('T')[0]}.xlsx`
+    );
   };
 
-  const clearMonthData = async () => {
-    if (!window.confirm(`Reset ${selectedMonth} to one blank row? This cannot be undone.`)) return;
-    const defaultRow = buildDefaultShipment();
-    await saveToFirebase([defaultRow]);
-  };
+  // ======== Summary calculations ========
+  const companySummary = (() => {
+    const summary = {};
+    shipments.forEach((s) => {
+      const key = s.company || '(Unassigned)';
+      if (!summary[key]) summary[key] = { count: 0, total: 0 };
+      summary[key].count += 1;
+      summary[key].total += Number(s.shippingCharge || 0);
+    });
+    return Object.entries(summary)
+      .map(([company, data]) => ({ company, ...data }))
+      .sort((a, b) => b.total - a.total);
+  })();
+
+  const totalCost = shipments.reduce((sum, s) => sum + Number(s.shippingCharge || 0), 0);
+  const maxCount = Math.max(...companySummary.map((c) => c.count), 1);
+  const chartColors = [
+    '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
+    '#06b6d4', '#6366f1', '#f97316', '#14b8a6', '#f43f5e',
+  ];
 
   // ======== Render helpers ========
   const renderCell = (rowIndex, field, value) => {
     const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.field === field;
     const isNumeric = field === 'shippingCharge';
-    const hasAutocomplete = field === 'company' || field === 'agent';
+    const hasAutocomplete =
+      field === 'company' ||
+      field === 'agent' ||
+      field === 'location' ||
+      field === 'returnLocation' ||
+      field === 'shipMethod';
 
     if (isEditing) {
       return (
@@ -374,27 +674,6 @@ function App() {
     );
   };
 
-  // ======== Summary calculations ========
-  const companySummary = (() => {
-    const summary = {};
-    shipments.forEach((s) => {
-      const key = s.company || '(Unassigned)';
-      if (!summary[key]) summary[key] = { count: 0, total: 0 };
-      summary[key].count += 1;
-      summary[key].total += Number(s.shippingCharge || 0);
-    });
-    return Object.entries(summary)
-      .map(([company, data]) => ({ company, ...data }))
-      .sort((a, b) => b.total - a.total);
-  })();
-
-  const totalCost = shipments.reduce((sum, s) => sum + Number(s.shippingCharge || 0), 0);
-  const maxCount = Math.max(...companySummary.map((c) => c.count), 1);
-  const chartColors = [
-    '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
-    '#06b6d4', '#6366f1', '#f97316', '#14b8a6', '#f43f5e',
-  ];
-
   // ======== UI ========
   return (
     <div style={{ minHeight: '100vh', background: 'white' }}>
@@ -410,7 +689,9 @@ function App() {
               <span style={{ fontSize: '11px', color: '#3b82f6', marginLeft: '8px' }}>🌐 Multi-user enabled</span>
             </p>
           </div>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            {/* Month selector */}
             <select
               value={selectedMonth}
               onChange={(e) => handleMonthChange(e.target.value)}
@@ -418,14 +699,66 @@ function App() {
             >
               {MONTHS.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
+
+            {/* Global Add Company */}
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <input
+                type="text"
+                value={newCompany}
+                placeholder="Add company…"
+                onChange={(e) => setNewCompany(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') addCompanyGlobal(); }}
+                style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '13px', minWidth: 180 }}
+              />
+              <button
+                onClick={addCompanyGlobal}
+                style={{ padding: '8px 12px', background: '#0f766e', color: 'white', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}
+                title="Add a new global company"
+              >
+                + Add Company
+              </button>
+            </div>
+
+            {/* Global Add Location */}
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <input
+                type="text"
+                value={newLocation}
+                placeholder="Add location…"
+                onChange={(e) => setNewLocation(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') addLocationGlobal(); }}
+                style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '13px', minWidth: 220 }}
+              />
+              <button
+                onClick={addLocationGlobal}
+                style={{ padding: '8px 12px', background: '#155e75', color: 'white', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}
+                title="Add a new global location"
+              >
+                + Add Location
+              </button>
+            </div>
+
+            {/* Excel export buttons */}
             <button
-              onClick={exportData}
-              style={{ padding: '8px 16px', background: '#10b981', color: 'white', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}
+              onClick={exportMonthExcel}
+              style={{ padding: '8px 12px', background: '#166534', color: 'white', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}
+              title="Export current month to Excel (with images)"
             >
-              💾 Export All
+              ⬇️ Export Month (Excel)
             </button>
             <button
-              onClick={clearMonthData}
+              onClick={exportAllMonthsExcel}
+              style={{ padding: '8px 12px', background: '#047857', color: 'white', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}
+              title="Export all months to Excel (data-only)"
+            >
+              ⬇️ Export All (Excel)
+            </button>
+
+            <button
+              onClick={async () => {
+                if (!window.confirm(`Reset ${selectedMonth} to one blank row? This cannot be undone.`)) return;
+                await saveToFirebase([buildDefaultShipment()]);
+              }}
               style={{ padding: '8px 16px', background: '#ef4444', color: 'white', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}
             >
               🗑️ Reset Month
@@ -455,8 +788,8 @@ function App() {
 
         {/* Charts Grid */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '24px' }}>
-          {/* Company Totals Table */}
-          <div style={{ background: 'white', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '16px' }}>
+          {/* Company Totals Table (capture area) */}
+          <div ref={costPerCompanyRef} style={{ background: 'white', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '16px' }}>
             <h3 style={{ fontWeight: 'bold', fontSize: '14px', marginBottom: '12px', color: '#334155' }}>Shipping Cost Per Company</h3>
             {companySummary.length > 0 ? (
               <table style={{ width: '100%', fontSize: '12px' }}>
@@ -488,8 +821,8 @@ function App() {
             )}
           </div>
 
-          {/* Bar Chart */}
-          <div style={{ background: 'white', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '16px' }}>
+          {/* Bar Chart (capture area) */}
+          <div ref={shipmentCountRef} style={{ background: 'white', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '16px' }}>
             <h3 style={{ fontWeight: 'bold', fontSize: '14px', marginBottom: '16px', color: '#334155' }}>Shipment Count by Company</h3>
             {companySummary.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -523,8 +856,8 @@ function App() {
           </div>
         </div>
 
-        {/* Revenue Distribution */}
-        <div style={{ background: 'white', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '16px', marginBottom: '24px' }}>
+        {/* Revenue Distribution (capture area) */}
+        <div ref={revenueDistRef} style={{ background: 'white', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '16px', marginBottom: '24px' }}>
           <h3 style={{ fontWeight: 'bold', fontSize: '14px', marginBottom: '16px', color: '#334155' }}>Revenue Distribution by Company</h3>
           {companySummary.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>

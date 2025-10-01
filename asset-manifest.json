@@ -1,15 +1,15 @@
 {
   "files": {
     "main.css": "/freight-dashboard/static/css/main.6669b369.css",
-    "main.js": "/freight-dashboard/static/js/main.26936218.js",
+    "main.js": "/freight-dashboard/static/js/main.63678364.js",
     "static/js/453.48c7246e.chunk.js": "/freight-dashboard/static/js/453.48c7246e.chunk.js",
     "index.html": "/freight-dashboard/index.html",
     "main.6669b369.css.map": "/freight-dashboard/static/css/main.6669b369.css.map",
-    "main.26936218.js.map": "/freight-dashboard/static/js/main.26936218.js.map",
+    "main.63678364.js.map": "/freight-dashboard/static/js/main.63678364.js.map",
     "453.48c7246e.chunk.js.map": "/freight-dashboard/static/js/453.48c7246e.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.6669b369.css",
-    "static/js/main.26936218.js"
+    "static/js/main.63678364.js"
   ]
 }
